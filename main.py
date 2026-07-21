@@ -146,10 +146,14 @@ def select_payroll_area_by_month(row: pd.Series, detected_month: Optional[int], 
         detected_month: Transaction month (1-12)
         quarter_start_month: Start month of current quarter (e.g., 4 for Q2 Apr-Jun)
     """
-    if detected_month is None:
+    print("woii ")
+    print(detected_month)
+    if detected_month is None or pd.isna(detected_month):
+        print("triggered")
         # If we can't detect month, use priority: 3 > 2 > 1
         for month in [3, 2, 1]:
             col_name = f"Payroll Area Bulan {month}"
+            print(col_name)
             if col_name in row and pd.notna(row[col_name]):
                 return row[col_name]
         return "NOT FOUND"
@@ -241,7 +245,21 @@ def load_medical_reimbursement_sheets(file_bytes: bytes, selected_sheets: List[s
 def load_employee_master(file_bytes: bytes, month: int) -> pd.DataFrame:
     """Load Employee Master file with required columns for specific month."""
     try:
-        df = pd.read_excel(io.BytesIO(file_bytes))
+        excel = pd.ExcelFile(io.BytesIO(file_bytes))
+
+        hr_sheets = [s for s in excel.sheet_names if "HR" in s]
+
+        # Baca semua sheet yang mengandung "HR"
+        df_dict = pd.read_excel(
+            io.BytesIO(file_bytes),
+            sheet_name=hr_sheets
+        )
+
+        # Jika ingin digabung menjadi satu DataFrame
+        df = pd.concat(
+            [v.assign(SourceSheet=k) for k, v in df_dict.items()],
+            ignore_index=True
+        )
         
         # Check for required columns
         required_columns = ["NIK", "Payroll Area"]
@@ -257,7 +275,7 @@ def load_employee_master(file_bytes: bytes, month: int) -> pd.DataFrame:
         
         return df
     except Exception as e:
-        st.error(f"Error loading {MONTH_NAMES[month]}: {str(e)}")
+        st.error(f"Error loading {MONTH_NAMES[month]}: {str(e)}, pastikan nama sheet pegawai mengandung 'HR'")
         return pd.DataFrame()
 
 
