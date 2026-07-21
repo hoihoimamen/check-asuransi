@@ -146,14 +146,11 @@ def select_payroll_area_by_month(row: pd.Series, detected_month: Optional[int], 
         detected_month: Transaction month (1-12)
         quarter_start_month: Start month of current quarter (e.g., 4 for Q2 Apr-Jun)
     """
-    print("woii ")
-    print(detected_month)
+
     if detected_month is None or pd.isna(detected_month):
-        print("triggered")
         # If we can't detect month, use priority: 3 > 2 > 1
         for month in [3, 2, 1]:
             col_name = f"Payroll Area Bulan {month}"
-            print(col_name)
             if col_name in row and pd.notna(row[col_name]):
                 return row[col_name]
         return "NOT FOUND"
