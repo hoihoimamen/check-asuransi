@@ -29,6 +29,16 @@ SOURCE_PAYROLL_AREA_PATTERNS = {
     "AG": re.compile(r"DIGITAL[\W_]*TALENT|(?<![A-Z0-9])TKWT(?![A-Z0-9])", re.IGNORECASE),
 }
 
+CLAIM_COUNT_COLUMN_CONFIG = {
+    "% of All Records": st.column_config.NumberColumn(
+        format="%.2f%%",
+        help="The area's claim count divided by the total claim count across all Payroll Areas.",
+    ),
+    "Not Found Records": st.column_config.NumberColumn(
+        help="The final Payroll Area could not be found in the employee masters."
+    ),
+}
+
 
 def get_worksheet_names(file_bytes: bytes) -> List[str]:
     """Extract worksheet names from Excel file."""
@@ -420,6 +430,10 @@ def calculate_statistics(df: pd.DataFrame, selected_sheets: List[str]) -> Dict:
     unique_nik = df["NIK"].nunique()
     matched = len(df[df["Payroll Area"] != "NOT FOUND"])
     not_found = len(df[df["Payroll Area"] == "NOT FOUND"])
+    status_counts = df["Payroll Area Check"].value_counts()
+    matched = status_counts.get("Match", 0)
+    mismatch = status_counts.get("Mismatch", 0)
+    not_found = status_counts.get("Not Found", 0)
     match_pct = (matched / total_records * 100) if total_records > 0 else 0
     not_found_pct = (not_found / total_records * 100) if total_records > 0 else 0
     
@@ -428,6 +442,7 @@ def calculate_statistics(df: pd.DataFrame, selected_sheets: List[str]) -> Dict:
         "total_records": total_records,
         "unique_nik": unique_nik,
         "matched": matched,
+        "mismatch": mismatch,
         "not_found": not_found,
         "match_pct": match_pct,
         "not_found_pct": not_found_pct
@@ -448,12 +463,17 @@ def display_kpi_metrics(stats: Dict):
         st.metric("Matched Records", f"{stats['matched']:,}")
     
     col5, col6, col7 = st.columns(3)
+    col5, col6, col7, col8 = st.columns(4)
     
     with col5:
         st.metric("Not Found Records", f"{stats['not_found']:,}")
+        st.metric("Mismatch Records", f"{stats['mismatch']:,}")
     with col6:
         st.metric("Match Percentage", f"{stats['match_pct']:.2f}%")
+        st.metric("Not Found Records", f"{stats['not_found']:,}")
     with col7:
+        st.metric("Match Percentage", f"{stats['match_pct']:.2f}%")
+    with col8:
         st.metric("Not Found Percentage", f"{stats['not_found_pct']:.2f}%")
 
 
@@ -479,14 +499,43 @@ def create_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     summary = summary.sort_values("Total Records", ascending=False)
     
     return summary
+    """Count claims by final Payroll Area and calculate each area's share of all claims."""
+    payroll_area_check = df["Payroll Area Check"]
+    summary = (
+        df.assign(
+            is_match=payroll_area_check.eq("Match"),
+            is_mismatch=payroll_area_check.eq("Mismatch"),
+            is_not_found=payroll_area_check.eq("Not Found"),
+        )
+        .groupby("Payroll Area", as_index=False)
+        .agg(**{
+            "Total Records": ("Payroll Area", "size"),
+            "Matched Records": ("is_match", "sum"),
+            "Mismatch Records": ("is_mismatch", "sum"),
+            "Not Found Records": ("is_not_found", "sum"),
+        })
+    )
 
+    area_totals = summary["Total Records"]
+    summary["% of All Records"] = (area_totals / area_totals.sum() * 100).round(2)
 
 def aggregate_by_payroll_area(df: pd.DataFrame, amount_columns: Dict[str, str]) -> pd.DataFrame:
+    columns = [
+        "Payroll Area", "Total Records", "Matched Records", "Mismatch Records",
+        "Not Found Records", "% of All Records",
+    ]
+    return summary[columns].sort_values("Total Records", ascending=False)
+
+
+def aggregate_by_payroll_area(
+    df: pd.DataFrame, amount_columns: Dict[str, str], count_summary: pd.DataFrame
+) -> pd.DataFrame:
     """Aggregate records by Payroll Area based on transaction month, summing amounts.
     
     Args:
         df: enriched dataframe with transaction-aware Payroll Area
         amount_columns: dict mapping sheet_name to amount_column_name
+        count_summary: record counts by final Payroll Area
     
     Returns:
         Aggregated dataframe grouped by Payroll Area with totals
@@ -529,7 +578,22 @@ def aggregate_by_payroll_area(df: pd.DataFrame, amount_columns: Dict[str, str]) 
     summary.rename(columns={"Numeric Amount": "Total Amount"}, inplace=True)
     
     total_records = summary["Total Records"].sum()
+    agg_df["Total Amount"] = numeric_amounts
+    amounts_by_status = {
+        "Matched Amount": "Match",
+        "Mismatch Amount": "Mismatch",
+        "Not Found Amount": "Not Found",
+    }
+    for column, status in amounts_by_status.items():
+        agg_df[column] = agg_df["Total Amount"].where(agg_df["Payroll Area Check"].eq(status), 0)
+
+    amount_columns_to_sum = ["Total Amount", *amounts_by_status]
+    amount_summary = agg_df.groupby("Payroll Area", as_index=False)[amount_columns_to_sum].sum().round(2)
+    summary = count_summary.drop(columns="% of All Records").merge(amount_summary, on="Payroll Area")
     total_amount = summary["Total Amount"].sum()
+    summary["% of Total Amount"] = (
+        (summary["Total Amount"] / total_amount * 100).round(2) if total_amount else None
+    )
     
     summary["Percentage Records"] = (summary["Total Records"] / total_records * 100).round(2)
     summary["Percentage Amount"] = (summary["Total Amount"] / total_amount * 100).round(2)
@@ -540,6 +604,7 @@ def aggregate_by_payroll_area(df: pd.DataFrame, amount_columns: Dict[str, str]) 
 
 
 def display_aggregation_summary(enriched_df: pd.DataFrame, agg_summary_df: pd.DataFrame):
+def display_aggregation_summary(agg_summary_df: pd.DataFrame):
     """Display aggregation summary with visual breakdown."""
     if agg_summary_df.empty:
         st.info("No aggregation data available.")
@@ -560,6 +625,9 @@ def display_aggregation_summary(enriched_df: pd.DataFrame, agg_summary_df: pd.Da
         avg_amount = total_amount / total_records if total_records > 0 else 0
         st.metric("Average per Record", f"Rp {avg_amount:,.0f}")
     
+        matched_amount = agg_summary_df["Matched Amount"].sum()
+        st.metric("Matched Amount", f"Rp {matched_amount:,.0f}")
+
     st.divider()
     
     # Show detailed breakdown
@@ -571,11 +639,27 @@ def display_aggregation_summary(enriched_df: pd.DataFrame, agg_summary_df: pd.Da
     display_df["Percentage Records"] = display_df["Percentage Records"].apply(lambda x: f"{x:.2f}%")
     display_df["Percentage Amount"] = display_df["Percentage Amount"].apply(lambda x: f"{x:.2f}%")
     
+    st.subheader("Claim Amounts by Payroll Area")
+    amount_columns = [
+        "Total Amount", "Matched Amount", "Mismatch Amount", "Not Found Amount",
+    ]
+    amounts = agg_summary_df[["Payroll Area", *amount_columns, "% of Total Amount"]]
+    amount_column_config = {
+        column: st.column_config.NumberColumn(format="Rp %,.0f") for column in amount_columns
+    }
+    amount_column_config["% of Total Amount"] = st.column_config.NumberColumn(
+        format="%.2f%%",
+        help="The area's total amount divided by the total amount across all Payroll Areas.",
+    )
     st.dataframe(
         display_df,
+        amounts,
         use_container_width=True,
         height=min(400, len(display_df) * 35 + 35),
         hide_index=True
+        height=min(400, len(amounts) * 35 + 35),
+        hide_index=True,
+        column_config=amount_column_config,
     )
     
     # Show top Payroll Areas
@@ -603,6 +687,7 @@ def create_processing_log(
     ignored_sheets: List[str],
     processing_time: float,
     stats: Dict
+    processing_time: float
 ) -> pd.DataFrame:
     """Create processing log dataframe."""
     log_data = {
@@ -620,6 +705,7 @@ def create_processing_log(
         "Matched": [stats["matched"]],
         "Not Found": [stats["not_found"]],
         "Match percentage": [f"{stats['match_pct']:.2f}%"]
+        "Processing time (seconds)": [round(processing_time, 2)]
     }
     return pd.DataFrame(log_data)
 
@@ -651,6 +737,7 @@ def export_to_excel(
 
 
 def display_data_table(df: pd.DataFrame, key_suffix: str):
+def display_data_table(df: pd.DataFrame, key_suffix: str, column_config: Optional[Dict] = None):
     """Display searchable, sortable dataframe."""
     if df.empty:
         st.info("No data to display.")
@@ -676,6 +763,8 @@ def display_data_table(df: pd.DataFrame, key_suffix: str):
         filtered_df,
         use_container_width=True,
         height=min(400, len(filtered_df) * 35 + 35)
+        height=min(400, len(filtered_df) * 35 + 35),
+        column_config=column_config,
     )
 
 
@@ -781,6 +870,7 @@ if process_button:
                         ignored_sheets=ignored_sheets,
                         processing_time=processing_time,
                         stats=stats
+                        processing_time=processing_time
                     )
                     
                     # Store in session state
@@ -798,6 +888,7 @@ if process_button:
 if st.session_state.processing_complete:
     enriched_df = add_payroll_area_source_check(st.session_state.enriched_data)
     stats = st.session_state.statistics
+    stats = calculate_statistics(enriched_df, st.session_state.selected_sheets)
     sheet_metadata = st.session_state.sheet_metadata
     
     # KPI Metrics
@@ -809,18 +900,32 @@ if st.session_state.processing_complete:
     # Prepare data for tabs
     matched_df = enriched_df[enriched_df["Payroll Area"] != "NOT FOUND"]
     not_found_df = enriched_df[enriched_df["Payroll Area"] == "NOT FOUND"]
+    payroll_area_check = enriched_df["Payroll Area Check"]
+    matched_df = enriched_df.loc[payroll_area_check.eq("Match")]
+    not_found_df = enriched_df.loc[payroll_area_check.eq("Not Found")]
     review_columns = ["Source Sheet", "Source Claim Payroll Area", "Payroll Area", "Payroll Area Check", "NIK"]
     remaining_columns = [column for column in enriched_df.columns if column not in review_columns]
     mismatch_df = enriched_df.loc[
         enriched_df["Payroll Area Check"].eq("Mismatch"), review_columns + remaining_columns
+        payroll_area_check.eq("Mismatch"), review_columns + remaining_columns
     ]
     summary_df = create_summary_table(enriched_df)
     
     # Build amount columns dict for aggregation
     amount_columns = {sheet: metadata.get('amount_column') for sheet, metadata in sheet_metadata.items()}
     agg_summary_df = aggregate_by_payroll_area(enriched_df, amount_columns)
+    agg_summary_df = aggregate_by_payroll_area(enriched_df, amount_columns, summary_df)
     
     log_df = st.session_state.processing_log
+    log_df = st.session_state.processing_log.assign(**{
+        "Total selected sheets": stats["total_sheets"],
+        "Total records": stats["total_records"],
+        "Unique NIK": stats["unique_nik"],
+        "Matched": stats["matched"],
+        "Mismatch": stats["mismatch"],
+        "Not Found": stats["not_found"],
+        "Match percentage": f"{stats['match_pct']:.2f}%",
+    })
     
     # Create tabs
     tab1, tab2, tab3, mismatch_tab, tab4, tab5, tab6 = st.tabs([
@@ -855,10 +960,12 @@ if st.session_state.processing_complete:
     with tab4:
         st.subheader("Summary by Payroll Area (Count)")
         display_data_table(summary_df, "summary")
+        display_data_table(summary_df, "summary", column_config=CLAIM_COUNT_COLUMN_CONFIG)
     
     with tab5:
         st.subheader("💰 Aggregated Summary by Payroll Area")
         display_aggregation_summary(enriched_df, agg_summary_df)
+        display_aggregation_summary(agg_summary_df)
     
     with tab6:
         st.subheader("Processing Log")
