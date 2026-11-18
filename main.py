@@ -628,6 +628,7 @@ def export_to_excel(
     all_data: pd.DataFrame,
     matched_data: pd.DataFrame,
     not_found_data: pd.DataFrame,
+    mismatch_data: pd.DataFrame,
     summary_data: pd.DataFrame,
     agg_summary_data: pd.DataFrame,
     log_data: pd.DataFrame
@@ -639,6 +640,7 @@ def export_to_excel(
         all_data.to_excel(writer, sheet_name="All Data", index=False)
         matched_data.to_excel(writer, sheet_name="Matched", index=False)
         not_found_data.to_excel(writer, sheet_name="Not Found", index=False)
+        mismatch_data.to_excel(writer, sheet_name="Payroll Area Mismatch", index=False)
         summary_data.to_excel(writer, sheet_name="Summary Count", index=False)
         if not agg_summary_data.empty:
             agg_summary_data.to_excel(writer, sheet_name="Summary Aggregated", index=False)
@@ -807,7 +809,11 @@ if st.session_state.processing_complete:
     # Prepare data for tabs
     matched_df = enriched_df[enriched_df["Payroll Area"] != "NOT FOUND"]
     not_found_df = enriched_df[enriched_df["Payroll Area"] == "NOT FOUND"]
-    mismatch_df = enriched_df[enriched_df["Payroll Area Check"] == "Mismatch"]
+    review_columns = ["Source Sheet", "Source Claim Payroll Area", "Payroll Area", "Payroll Area Check", "NIK"]
+    remaining_columns = [column for column in enriched_df.columns if column not in review_columns]
+    mismatch_df = enriched_df.loc[
+        enriched_df["Payroll Area Check"].eq("Mismatch"), review_columns + remaining_columns
+    ]
     summary_df = create_summary_table(enriched_df)
     
     # Build amount columns dict for aggregation
@@ -844,9 +850,7 @@ if st.session_state.processing_complete:
     with mismatch_tab:
         st.subheader("Payroll Area Mismatch")
         st.metric("Count", f"{len(mismatch_df):,}")
-        review_columns = ["Source Sheet", "Source Claim Payroll Area", "Payroll Area", "Payroll Area Check", "NIK"]
-        remaining_columns = [column for column in mismatch_df.columns if column not in review_columns]
-        display_data_table(mismatch_df[review_columns + remaining_columns], "payroll_area_mismatch")
+        display_data_table(mismatch_df, "payroll_area_mismatch")
     
     with tab4:
         st.subheader("Summary by Payroll Area (Count)")
@@ -865,7 +869,7 @@ if st.session_state.processing_complete:
     # Export section
     st.subheader("💾 Export")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         csv_all = enriched_df.to_csv(index=False)
@@ -895,6 +899,14 @@ if st.session_state.processing_complete:
         )
     
     with col4:
+        st.download_button(
+            label="📥 Payroll Area Mismatch (CSV)",
+            data=mismatch_df.to_csv(index=False),
+            file_name="medical_payroll_area_mismatch.csv",
+            mime="text/csv"
+        )
+
+    with col5:
         csv_summary = summary_df.to_csv(index=False)
         st.download_button(
             label="📥 Summary (CSV)",
@@ -905,7 +917,9 @@ if st.session_state.processing_complete:
     
     # Excel export
     st.markdown("---")
-    excel_bytes = export_to_excel(enriched_df, matched_df, not_found_df, summary_df, agg_summary_df, log_df)
+    excel_bytes = export_to_excel(
+        enriched_df, matched_df, not_found_df, mismatch_df, summary_df, agg_summary_df, log_df
+    )
     st.download_button(
         label="📊 Download Complete Excel Workbook",
         data=excel_bytes,
