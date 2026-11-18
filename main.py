@@ -3,6 +3,7 @@ import pandas as pd
 import openpyxl
 from datetime import datetime
 import io
+import re
 from typing import Tuple, List, Dict, Optional
 import time
 
@@ -22,6 +23,12 @@ MONTH_NAMES = {
     3: "Bulan 3 (Ending)"
 }
 
+SOURCE_PAYROLL_AREA_PATTERNS = {
+    "AA": re.compile(r"TPPBW", re.IGNORECASE),
+    "AD": re.compile(r"(?<![A-Z0-9])TM(?![A-Z0-9])", re.IGNORECASE),
+    "AG": re.compile(r"DIGITAL[\W_]*TALENT|(?<![A-Z0-9])TKWT(?![A-Z0-9])", re.IGNORECASE),
+}
+
 
 def get_worksheet_names(file_bytes: bytes) -> List[str]:
     """Extract worksheet names from Excel file."""
@@ -38,6 +45,12 @@ def filter_worksheet_names(sheet_names: List[str]) -> Tuple[List[str], List[str]
     ba_sheets = [name for name in sheet_names if name.startswith("BA")]
     valid_sheets = [name for name in sheet_names if not name.startswith("BA")]
     return valid_sheets, ba_sheets
+
+
+def get_source_payroll_area(sheet_name: str) -> Optional[str]:
+    """Return the Payroll Area code when a worksheet name identifies one area."""
+    areas = [code for code, pattern in SOURCE_PAYROLL_AREA_PATTERNS.items() if pattern.search(sheet_name)]
+    return areas[0] if len(areas) == 1 else None
 
 
 def remove_rows_after_total(df: pd.DataFrame) -> pd.DataFrame:
@@ -377,6 +390,27 @@ def join_medical_to_master(medical_df: pd.DataFrame, master_df: pd.DataFrame) ->
     # Fill remaining NaN with "NOT FOUND"
     result['Payroll Area'] = result['Payroll Area'].fillna("NOT FOUND")
     
+    return result
+
+
+def add_payroll_area_source_check(df: pd.DataFrame) -> pd.DataFrame:
+    """Compare the source worksheet's area with each claim's final Payroll Area."""
+    sheet_codes = {
+        sheet_name: get_source_payroll_area(sheet_name)
+        for sheet_name in df["Source Sheet"].dropna().unique()
+    }
+    source_areas = df["Source Sheet"].map(sheet_codes).astype("string")
+    final_areas = df["Payroll Area"].astype("string").str.strip().str.upper().fillna("NOT FOUND")
+    matched_areas = final_areas.eq(source_areas).fillna(False)
+
+    checks = pd.Series("Mismatch", index=df.index)
+    checks.loc[matched_areas] = "Match"
+    checks.loc[source_areas.isna()] = "Source Unmapped"
+    checks.loc[final_areas.eq("NOT FOUND")] = "Not Found"
+
+    result = df.copy()
+    result["Source Claim Payroll Area"] = source_areas
+    result["Payroll Area Check"] = checks
     return result
 
 
@@ -760,7 +794,7 @@ if process_button:
 
 # Display results if processing is complete
 if st.session_state.processing_complete:
-    enriched_df = st.session_state.enriched_data
+    enriched_df = add_payroll_area_source_check(st.session_state.enriched_data)
     stats = st.session_state.statistics
     sheet_metadata = st.session_state.sheet_metadata
     
@@ -773,6 +807,7 @@ if st.session_state.processing_complete:
     # Prepare data for tabs
     matched_df = enriched_df[enriched_df["Payroll Area"] != "NOT FOUND"]
     not_found_df = enriched_df[enriched_df["Payroll Area"] == "NOT FOUND"]
+    mismatch_df = enriched_df[enriched_df["Payroll Area Check"] == "Mismatch"]
     summary_df = create_summary_table(enriched_df)
     
     # Build amount columns dict for aggregation
@@ -782,7 +817,15 @@ if st.session_state.processing_complete:
     log_df = st.session_state.processing_log
     
     # Create tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["All Data", "Matched", "Not Found", "Summary", "Aggregated by PArea", "Processing Log"])
+    tab1, tab2, tab3, mismatch_tab, tab4, tab5, tab6 = st.tabs([
+        "All Data",
+        "Matched",
+        "Not Found",
+        "Payroll Area Mismatch",
+        "Summary",
+        "Aggregated by PArea",
+        "Processing Log",
+    ])
     
     with tab1:
         st.subheader("All Data")
@@ -797,6 +840,13 @@ if st.session_state.processing_complete:
         st.subheader("Not Found Records")
         st.metric("Count", f"{len(not_found_df):,}")
         display_data_table(not_found_df, "not_found")
+
+    with mismatch_tab:
+        st.subheader("Payroll Area Mismatch")
+        st.metric("Count", f"{len(mismatch_df):,}")
+        review_columns = ["Source Sheet", "Source Claim Payroll Area", "Payroll Area", "Payroll Area Check", "NIK"]
+        remaining_columns = [column for column in mismatch_df.columns if column not in review_columns]
+        display_data_table(mismatch_df[review_columns + remaining_columns], "payroll_area_mismatch")
     
     with tab4:
         st.subheader("Summary by Payroll Area (Count)")
